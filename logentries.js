@@ -3,7 +3,6 @@ var rx = require('rxjs/Rx');
 var moment = require('moment');
 
 var logentries = (function logentries() {
-  // var path = 'https://pull.logentries.com/829f19c8-4ca0-42dc-8f4d-1eeddbee31dc/hosts/Test%20set/API/?'
   var parse = function(line) {
     var index = line.indexOf(' ');
     return {
@@ -12,25 +11,36 @@ var logentries = (function logentries() {
     };
   }
 
-  var filt = function(data, level) {
+  var filterOnLogLevel = function(data, level) {
     return data.filter(function(x) {  x.level === level});
   }
 
-  var logsReply = function(data, ts) {
+  var count = function(logs) {
+    return logs
+      ? logs.length
+      : 0;
+  }
+  var logsReply = function(data, totalTime, minutesOrHours) {
     // var lvl = {TRACE: 0, DEBUG: 0, INFO: 1, WARN: 3, ERROR: 4, FATAL: 7};
-    var trace = filt(data, 'trace').length;
-    var debug = filt(data, 'debug').length;
-    var info = filt(data, 'info').length;
-    var warn = filt(data, 'warn').length;
-    var error = filt(data, 'error').length;
-    var fatal = filt(data, 'fatal').length;
-    return 'það eru ' + data.length.toString() + ' færslur síðustu ' + ts + '. Þar af eru ' + fatal.toString() + ' fatal, ' + error.toString() + ' error, ' + warn.toString() + ' warnings.';
+    var trace = count(filterOnLogLevel(data, 'trace'));
+    var debug = count(filterOnLogLevel(data, 'debug'));
+    var info = count(filterOnLogLevel(data, 'info'));
+    var warn = count(filterOnLogLevel(data, 'warn'));
+    var error = count(filterOnLogLevel(data, 'error'));
+    var fatal = count(filterOnLogLevel(data, 'fatal'));
+    return 'það eru ' + data.length.toString() + ' færslur síðustu ' + totalTime + ' ' +
+      minutesOrHoursStrings(minutesOrHours) + '. Þar af eru ' + fatal.toString() + ' fatal, ' + error.toString() + ' error, ' + warn.toString() + ' warnings.';
   }
 
+  // the time those minutes ago
   var minutesAgo = function(minutes) {
     return moment().subtract(minutes, 'minutes').toDate();
   }
 
+  // green: nothig to worry about
+  // yellow: there were warnings
+  // orange: we had errors
+  // red: fatals
   var statusIndex = function(warning, err, fatal) {
     return fatal
       ? 'red'
@@ -40,12 +50,37 @@ var logentries = (function logentries() {
           ? 'yellow'
           : 'green';
   }
+
+  var isTimeInHours = function(minutesOrHours) {
+    return minutesOrHours === 'hr';
+  }
+
+  var timeInMinutes = function timeInMinutes(totalTime, minutesOrHours){
+    return totalTime * isTimeInHours(minutesOrHours)
+      ? 60
+      : 1;
+  }
+
+  var timespans = function(minutesOrHours) {
+    return isTimeInHours(minutesOrHours)
+      ? ['klukkustund', 'klukkustundir' ]
+      : ['mínútu', 'mínútur'];
+  }
+
+  var singularOrPlural = function(totalTime) {
+    return totalTime === 1 ? 0 : 1;
+  }
+
+  var minutesOrHoursStrings = function(totalTime) {
+    return timespans(totalTime)[singularOrPlural(totalTime)];
+  }
+
   var staðan = function(data) {
     var color = { 'green': '#33cc33', 'yellow': '#ffff00', orange: '#ff6600', red: '#ff0000' };
     var statusMssg = { 'green': 'Allt í góðu lagi', 'yellow': 'Þú hefur fengið aðvörun!', orange: 'Það eru villur!', red: 'OMG! Allt í fokki!' };
-    var warn = filt(data, 'warn').length;
-    var error = filt(data, 'error').length;
-    var fatal = filt(data, 'fatal').length;
+    var warn = filterOnLogLevel(data, 'warn').length;
+    var error = filterOnLogLevel(data, 'error').length;
+    var fatal = filterOnLogLevel(data, 'fatal').length;
     var status = statusIndex(warn, error, fatal);
     return {
       text: statusMssg[status],
@@ -56,14 +91,10 @@ var logentries = (function logentries() {
     }
   }
 
-  var call = function(num, time, callb) {
-    var min = num;
-    if (time === 'hr') {
-      min = min * 60;
-    }
+  var call = function(totalTime, minutesOrHours, callb) {
+    var min = timeInMinutes(totalTime, minutesOrHours);
     var start = minutesAgo(min).valueOf();
     var path = '/829f19c8-4ca0-42dc-8f4d-1eeddbee31dc/hosts/Test%20set/API/?start=' + start;
-    var p = path + 'start=' + '1466640000000';
     var options = {
       hostname: 'pull.logentries.com',
       path: path,
@@ -83,30 +114,26 @@ var logentries = (function logentries() {
           var line = remaining.substring(0, index);
           data.push(parse(line));
           remaining = remaining.substring(index + 1);
-          var index = remaining.indexOf('\n');
+          index = remaining.indexOf('\n');
         }
         callb(data)
       })
     }).end();
   }
 
-  var monkey = function(num, time) {
-    return time;
-  }
-
   return {
-    logsInline: function(num, time) {
+    logsInline: function(totalTime, minutesOrHours) {
       return rx.Observable.create(function(observer) {
-        call(num, time, function(res) {
-          observer.next(logsReply(res, 20));
+        call(totalTime, minutesOrHours, function(res) {
+          observer.next(logsReply(res, totalTime, minutesOrHours));
           observer.complete();
         })
       });
     },
 
-    logs: function(num, time) {
+    logs: function(totalTime, minutesOrHours) {
       return rx.Observable.create(function(observer) {
-        call(num, time, function(data) {
+        call(totalTime, minutesOrHours, function(data) {
           var status = staðan(data);
           var attachments = [];
           var attachment = {
@@ -117,7 +144,7 @@ var logentries = (function logentries() {
 
           attachment.fields.push({
             label: 'Field',
-            value: 'Samtals ' + data.length + ' loggar á síðustu ' + num +  ' ' + monkey(num, time),
+            value: 'Samtals ' + data.length + ' loggar síðustu ' + totalTime +  ' ' + minutesOrHoursStrings(minutesOrHours),
             short: false,
           });
 
